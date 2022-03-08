@@ -24,6 +24,7 @@ type Config struct {
 	Username    string
 	Password    string
 	TLSConf     *tls.Config
+	Direct      bool
 }
 
 func Dial(conf *Config) (*mongo.Client, error) {
@@ -38,7 +39,8 @@ func Dial(conf *Config) (*mongo.Client, error) {
 			Username: conf.Username,
 		}).
 		SetWriteConcern(writeconcern.New(writeconcern.WMajority(), writeconcern.J(true))).
-		SetReadPreference(readpref.Primary()).SetTLSConfig(conf.TLSConf)
+		SetReadPreference(readpref.Primary()).SetTLSConfig(conf.TLSConf).
+		SetDirect(conf.Direct)
 
 	client, err := mongo.Connect(ctx, opts)
 	if err != nil {
@@ -489,6 +491,29 @@ func (m *ConfigMembers) FixTags(compareWith ConfigMembers) (changes bool) {
 	return changes
 }
 
+// FixPriorities corrects the priority of any member if they changed.
+func (m *ConfigMembers) FixPriorities(compareWith ConfigMembers) (changes bool) {
+	if len(*m) < 1 {
+		return changes
+	}
+
+	cm := make(map[string]int, len(compareWith))
+
+	for _, member := range compareWith {
+		cm[member.Host] = member.Priority
+	}
+
+	for i := 0; i < len(*m); i++ {
+		member := []ConfigMember(*m)[i]
+		if c, ok := cm[member.Host]; ok && member.Priority != c {
+			changes = true
+			[]ConfigMember(*m)[i].Priority = c
+		}
+	}
+
+	return changes
+}
+
 // ExternalNodesChanged checks if votes or priority fields changed for external nodes
 func (m *ConfigMembers) ExternalNodesChanged(compareWith ConfigMembers) bool {
 	cm := make(map[string]struct {
@@ -586,7 +611,7 @@ func (m *ConfigMembers) SetVotes() {
 				// We're setting it to 2 as default, to allow
 				// users to configure external nodes with lower
 				// priority than local nodes.
-				[]ConfigMember(*m)[i].Priority = 2
+				[]ConfigMember(*m)[i].Priority = DefaultPriority
 			}
 		} else if member.ArbiterOnly {
 			// Arbiter should always have a vote

@@ -29,3 +29,12 @@ func (r *ReconcilePerconaServerMongoDB) mongosClientWithRole(ctx context.Context
 
 	return psmdb.MongosClient(ctx, r.client, cr, c)
 }
+
+func (r *ReconcilePerconaServerMongoDB) standaloneClientWithRole(cr *api.PerconaServerMongoDB, role UserRole, host string) (*mgo.Client, error) {
+	c, err := r.getInternalCredentials(cr, role)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get credentials")
+	}
+
+	return psmdb.StandaloneClient(r.client, cr, c, host)
+}

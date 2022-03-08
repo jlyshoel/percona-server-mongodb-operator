@@ -47,7 +47,12 @@ func (r *ReconcilePerconaServerMongoDB) reconcileCluster(ctx context.Context, cr
 	cli, err := r.mongoClientWithRole(ctx, cr, *replset, roleClusterAdmin)
 	if err != nil {
 		if cr.Status.Replsets[replset.Name].Initialized {
-			return api.AppStateError, errors.Wrap(err, "dial:")
+			// If replset is initialized but connection fails, try to recover
+			log.Info("Cluster crashed, trying to recover", "cluster", cr.Name)
+			if err := r.forceReconfig(cr, replset, pods.Items[0]); err != nil {
+				return api.AppStateError, errors.Wrap(err, "force reconfig to recover")
+			}
+			return api.AppStateError, errors.Wrap(err, "dial")
 		}
 
 		err := r.handleReplsetInit(ctx, cr, replset, pods.Items)
@@ -157,6 +162,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileCluster(ctx context.Context, cr
 			ID:           key,
 			Host:         host,
 			BuildIndexes: true,
+			Priority:     mongo.DefaultPriority,
 		}
 
 		switch pod.Labels["app.kubernetes.io/component"] {
@@ -196,7 +202,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileCluster(ctx context.Context, cr
 		members = append(members, member)
 	}
 
-	if cnf.Members.FixTags(members) {
+	if cnf.Members.FixTags(members) || cnf.Members.FixPriorities(members) {
 		cnf.Members.SetVotes()
 
 		cnf.Version++
@@ -519,6 +525,31 @@ func (r *ReconcilePerconaServerMongoDB) createSystemUsers(ctx context.Context, c
 	)
 	if err != nil {
 		return errors.Wrap(err, "failed to create backup")
+	}
+
+	return nil
+}
+
+func (r *ReconcilePerconaServerMongoDB) forceReconfig(cr *api.PerconaServerMongoDB, replset *api.ReplsetSpec, pod corev1.Pod) error {
+	host, err := psmdb.MongoHost(r.client, cr, replset.Name, replset.Expose.Enabled, pod)
+	if err != nil {
+		return errors.Wrapf(err, "get mongo hostname for pod/%s", pod.Name)
+	}
+
+	cli, err := r.standaloneClientWithRole(cr, roleClusterAdmin, host)
+	if err != nil {
+		return errors.Wrap(err, "get standalone client")
+	}
+
+	cnf, err := mongo.ReadConfig(context.TODO(), cli)
+	if err != nil {
+		return errors.Wrap(err, "get mongo config")
+	}
+
+	cnf.Members[0].Priority++
+
+	if err := mongo.WriteConfig(context.TODO(), cli, cnf); err != nil {
+		return errors.Wrap(err, "write mongo config")
 	}
 
 	return nil
