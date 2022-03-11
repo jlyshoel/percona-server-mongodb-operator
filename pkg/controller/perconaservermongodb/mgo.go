@@ -49,7 +49,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileCluster(ctx context.Context, cr
 		if cr.Status.Replsets[replset.Name].Initialized {
 			// If replset is initialized but connection fails, try to recover
 			log.Info("Cluster crashed, trying to recover", "cluster", cr.Name)
-			if err := r.forceReconfig(cr, replset, pods.Items[0]); err != nil {
+			if err := r.forceReconfig(ctx, cr, replset, pods.Items[0]); err != nil {
 				return api.AppStateError, errors.Wrap(err, "force reconfig to recover")
 			}
 			return api.AppStateError, errors.Wrap(err, "dial")
@@ -530,13 +530,13 @@ func (r *ReconcilePerconaServerMongoDB) createSystemUsers(ctx context.Context, c
 	return nil
 }
 
-func (r *ReconcilePerconaServerMongoDB) forceReconfig(cr *api.PerconaServerMongoDB, replset *api.ReplsetSpec, pod corev1.Pod) error {
-	host, err := psmdb.MongoHost(r.client, cr, replset.Name, replset.Expose.Enabled, pod)
+func (r *ReconcilePerconaServerMongoDB) forceReconfig(ctx context.Context, cr *api.PerconaServerMongoDB, replset *api.ReplsetSpec, pod corev1.Pod) error {
+	host, err := psmdb.MongoHost(ctx, r.client, cr, replset.Name, replset.Expose.Enabled, pod)
 	if err != nil {
 		return errors.Wrapf(err, "get mongo hostname for pod/%s", pod.Name)
 	}
 
-	cli, err := r.standaloneClientWithRole(cr, roleClusterAdmin, host)
+	cli, err := r.standaloneClientWithRole(ctx, cr, roleClusterAdmin, host)
 	if err != nil {
 		return errors.Wrap(err, "get standalone client")
 	}
