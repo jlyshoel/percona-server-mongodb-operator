@@ -44,7 +44,7 @@ func Dial(conf *Config) (*mongo.Client, error) {
 
 	client, err := mongo.Connect(ctx, opts)
 	if err != nil {
-		return nil, errors.Errorf("failed to connect to mongo rs: %v", err)
+		return nil, errors.Wrap(err, "connect to mongo rs")
 	}
 
 	defer func() {
@@ -61,7 +61,7 @@ func Dial(conf *Config) (*mongo.Client, error) {
 
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
-		return nil, errors.Errorf("failed to ping mongo: %v", err)
+		return nil, errors.Wrap(err, "ping mongo")
 	}
 
 	return client, nil

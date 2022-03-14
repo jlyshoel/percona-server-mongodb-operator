@@ -8,6 +8,8 @@ import (
 
 	"github.com/pkg/errors"
 	mgo "go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/description"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/topology"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -47,11 +49,22 @@ func (r *ReconcilePerconaServerMongoDB) reconcileCluster(ctx context.Context, cr
 	cli, err := r.mongoClientWithRole(ctx, cr, *replset, roleClusterAdmin)
 	if err != nil {
 		if cr.Status.Replsets[replset.Name].Initialized {
-			// If replset is initialized but connection fails, try to recover
-			log.Info("Cluster crashed, trying to recover", "cluster", cr.Name)
-			if err := r.forceReconfig(ctx, cr, replset, pods.Items[0]); err != nil {
-				return api.AppStateError, errors.Wrap(err, "force reconfig to recover")
+			// If replset is initialized but connection fails with ReplicaSetNoPrimary,
+			// try to recover by forcing reconfig
+			serverSelectionError, ok := errors.Cause(err).(topology.ServerSelectionError)
+			if ok {
+				if serverSelectionError.Desc.Kind != description.ReplicaSetNoPrimary {
+					return api.AppStateError, errors.Wrap(err, "dial")
+				}
+
+				log.Error(err, "Cluster crashed, trying to recover", "cluster", cr.Name)
+				if err := r.forceReconfig(ctx, cr, replset, pods.Items[0]); err != nil {
+					return api.AppStateError, errors.Wrap(err, "force reconfig to recover")
+				}
+
+				return api.AppStateInit, nil
 			}
+
 			return api.AppStateError, errors.Wrap(err, "dial")
 		}
 
