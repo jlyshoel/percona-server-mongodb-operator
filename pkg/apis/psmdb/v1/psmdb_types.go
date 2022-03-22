@@ -51,26 +51,27 @@ const (
 
 // PerconaServerMongoDBSpec defines the desired state of PerconaServerMongoDB
 type PerconaServerMongoDBSpec struct {
-	Pause                   bool                                 `json:"pause,omitempty"`
-	Unmanaged               bool                                 `json:"unmanaged,omitempty"`
-	CRVersion               string                               `json:"crVersion,omitempty"`
-	Platform                *version.Platform                    `json:"platform,omitempty"`
-	Image                   string                               `json:"image,omitempty"`
-	ImagePullSecrets        []corev1.LocalObjectReference        `json:"imagePullSecrets,omitempty"`
-	RunUID                  int64                                `json:"runUid,omitempty"`
-	UnsafeConf              bool                                 `json:"allowUnsafeConfigurations,omitempty"`
-	Mongod                  *MongodSpec                          `json:"mongod,omitempty"`
-	Replsets                []*ReplsetSpec                       `json:"replsets,omitempty"`
-	Secrets                 *SecretsSpec                         `json:"secrets,omitempty"`
-	Backup                  BackupSpec                           `json:"backup,omitempty"`
-	ImagePullPolicy         corev1.PullPolicy                    `json:"imagePullPolicy,omitempty"`
-	PMM                     PMMSpec                              `json:"pmm,omitempty"`
-	UpdateStrategy          appsv1.StatefulSetUpdateStrategyType `json:"updateStrategy,omitempty"`
-	UpgradeOptions          UpgradeOptions                       `json:"upgradeOptions,omitempty"`
-	SchedulerName           string                               `json:"schedulerName,omitempty"`
-	ClusterServiceDNSSuffix string                               `json:"clusterServiceDNSSuffix,omitempty"`
-	Sharding                Sharding                             `json:"sharding,omitempty"`
-	InitImage               string                               `json:"initImage,omitempty"`
+	Pause                     bool                                 `json:"pause,omitempty"`
+	Unmanaged                 bool                                 `json:"unmanaged,omitempty"`
+	CRVersion                 string                               `json:"crVersion,omitempty"`
+	Platform                  *version.Platform                    `json:"platform,omitempty"`
+	Image                     string                               `json:"image,omitempty"`
+	ImagePullSecrets          []corev1.LocalObjectReference        `json:"imagePullSecrets,omitempty"`
+	RunUID                    int64                                `json:"runUid,omitempty"`
+	UnsafeConf                bool                                 `json:"allowUnsafeConfigurations,omitempty"`
+	Mongod                    *MongodSpec                          `json:"mongod,omitempty"`
+	Replsets                  []*ReplsetSpec                       `json:"replsets,omitempty"`
+	Secrets                   *SecretsSpec                         `json:"secrets,omitempty"`
+	Backup                    BackupSpec                           `json:"backup,omitempty"`
+	ImagePullPolicy           corev1.PullPolicy                    `json:"imagePullPolicy,omitempty"`
+	PMM                       PMMSpec                              `json:"pmm,omitempty"`
+	UpdateStrategy            appsv1.StatefulSetUpdateStrategyType `json:"updateStrategy,omitempty"`
+	UpgradeOptions            UpgradeOptions                       `json:"upgradeOptions,omitempty"`
+	SchedulerName             string                               `json:"schedulerName,omitempty"`
+	ClusterServiceDNSSuffix   string                               `json:"clusterServiceDNSSuffix,omitempty"`
+	ClusterServiceServiceMesh bool                                 `json:"clusterServiceServiceMesh,omitempty"`
+	Sharding                  Sharding                             `json:"sharding,omitempty"`
+	InitImage                 string                               `json:"initImage,omitempty"`
 }
 
 const (
