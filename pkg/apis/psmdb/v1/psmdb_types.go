@@ -71,7 +71,7 @@ type PerconaServerMongoDBSpec struct {
 	UpgradeOptions          UpgradeOptions                       `json:"upgradeOptions,omitempty"`
 	SchedulerName           string                               `json:"schedulerName,omitempty"`
 	ClusterServiceDNSSuffix string                               `json:"clusterServiceDNSSuffix,omitempty"`
-	ServiceMeshDNS          bool                                 `json:"ServiceMeshDNS,omitempty"`
+	ServiceMeshDNS          bool                                 `json:"serviceMeshDNS,omitempty"`
 	Sharding                Sharding                             `json:"sharding,omitempty"`
 	InitImage               string                               `json:"initImage,omitempty"`
 	TLS                     *TLSSpec                             `json:"tls,omitempty"`
