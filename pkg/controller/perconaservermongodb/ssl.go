@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	cm "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
+	cm "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -18,24 +18,38 @@ import (
 	"github.com/percona/percona-server-mongodb-operator/pkg/psmdb/tls"
 )
 
-func (r *ReconcilePerconaServerMongoDB) reconsileSSL(cr *api.PerconaServerMongoDB) error {
+func (r *ReconcilePerconaServerMongoDB) reconsileSSL(ctx context.Context, cr *api.PerconaServerMongoDB) error {
 	secretObj := corev1.Secret{}
-	err := r.client.Get(context.TODO(),
+	secretInternalObj := corev1.Secret{}
+	errSecret := r.client.Get(ctx,
 		types.NamespacedName{
 			Namespace: cr.Namespace,
 			Name:      cr.Spec.Secrets.SSL,
 		},
 		&secretObj,
 	)
-	if err == nil {
+	errInternalSecret := r.client.Get(ctx,
+		types.NamespacedName{
+			Namespace: cr.Namespace,
+			Name:      cr.Spec.Secrets.SSL + "-ssl-internal",
+		},
+		&secretInternalObj,
+	)
+	if errSecret == nil && errInternalSecret == nil {
 		return nil
-	} else if !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("get secret: %v", err)
+	} else if errSecret != nil && !k8serrors.IsNotFound(errSecret) {
+		return fmt.Errorf("get secret: %v", errSecret)
+	} else if errInternalSecret != nil && !k8serrors.IsNotFound(errInternalSecret) {
+		return fmt.Errorf("get internal secret: %v", errInternalSecret)
 	}
-	err = r.createSSLByCertManager(cr)
+	// don't create secret ssl-internal if secret ssl is not created by operator
+	if errSecret == nil && !metav1.IsControlledBy(&secretObj, cr) {
+		return nil
+	}
+	err := r.createSSLByCertManager(ctx, cr)
 	if err != nil {
 		log.Error(err, "issue cert with cert-manager")
-		err = r.createSSLManualy(cr)
+		err = r.createSSLManualy(ctx, cr)
 		if err != nil {
 			return fmt.Errorf("create ssl manualy: %v", err)
 		}
@@ -43,7 +57,7 @@ func (r *ReconcilePerconaServerMongoDB) reconsileSSL(cr *api.PerconaServerMongoD
 	return nil
 }
 
-func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaServerMongoDB) error {
+func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(ctx context.Context, cr *api.PerconaServerMongoDB) error {
 	issuerKind := "Issuer"
 	issuerName := cr.Name + "-psmdb-ca"
 	certificateDNSNames := []string{"localhost"}
@@ -57,7 +71,7 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		return err
 	}
 	ownerReferences := []metav1.OwnerReference{owner}
-	err = r.client.Create(context.TODO(), &cm.Issuer{
+	err = r.client.Create(ctx, &cm.Issuer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            issuerName,
 			Namespace:       cr.Namespace,
@@ -73,18 +87,21 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		return fmt.Errorf("create issuer: %v", err)
 	}
 
-	err = r.client.Create(context.TODO(), &cm.Certificate{
+	err = r.client.Create(ctx, &cm.Certificate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            cr.Name + "-ssl",
 			Namespace:       cr.Namespace,
 			OwnerReferences: ownerReferences,
 		},
 		Spec: cm.CertificateSpec{
-			Organization: []string{"PSMDB"},
-			CommonName:   cr.Name,
-			SecretName:   cr.Spec.Secrets.SSL,
-			DNSNames:     certificateDNSNames,
-			IsCA:         true,
+			Subject: &cm.X509Subject{
+				Organizations: []string{"PSMDB"},
+			},
+			CommonName: cr.Name,
+			SecretName: cr.Spec.Secrets.SSL,
+			DNSNames:   certificateDNSNames,
+			IsCA:       true,
+			Duration:   &cr.Spec.TLS.CertValidityDuration,
 			IssuerRef: cmmeta.ObjectReference{
 				Name: issuerName,
 				Kind: issuerKind,
@@ -95,21 +112,24 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		return fmt.Errorf("create certificate: %v", err)
 	}
 	if cr.Spec.Secrets.SSL == cr.Spec.Secrets.SSLInternal {
-		return r.waitForCerts(cr.Namespace, cr.Spec.Secrets.SSL)
+		return r.waitForCerts(ctx, cr.Namespace, cr.Spec.Secrets.SSL)
 	}
 
-	err = r.client.Create(context.TODO(), &cm.Certificate{
+	err = r.client.Create(ctx, &cm.Certificate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            cr.Name + "-ssl-internal",
 			Namespace:       cr.Namespace,
 			OwnerReferences: ownerReferences,
 		},
 		Spec: cm.CertificateSpec{
-			Organization: []string{"PSMDB"},
-			CommonName:   cr.Name,
-			SecretName:   cr.Spec.Secrets.SSLInternal,
-			DNSNames:     certificateDNSNames,
-			IsCA:         true,
+			Subject: &cm.X509Subject{
+				Organizations: []string{"PSMDB"},
+			},
+			CommonName: cr.Name,
+			SecretName: cr.Spec.Secrets.SSLInternal,
+			DNSNames:   certificateDNSNames,
+			IsCA:       true,
+			Duration:   &cr.Spec.TLS.CertValidityDuration,
 			IssuerRef: cmmeta.ObjectReference{
 				Name: issuerName,
 				Kind: issuerKind,
@@ -120,10 +140,10 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		return fmt.Errorf("create internal certificate: %v", err)
 	}
 
-	return r.waitForCerts(cr.Namespace, cr.Spec.Secrets.SSL, cr.Spec.Secrets.SSLInternal)
+	return r.waitForCerts(ctx, cr.Namespace, cr.Spec.Secrets.SSL, cr.Spec.Secrets.SSLInternal)
 }
 
-func (r *ReconcilePerconaServerMongoDB) waitForCerts(namespace string, secretsList ...string) error {
+func (r *ReconcilePerconaServerMongoDB) waitForCerts(ctx context.Context, namespace string, secretsList ...string) error {
 	ticker := time.NewTicker(1 * time.Second)
 	timeoutTimer := time.NewTimer(30 * time.Second)
 	defer timeoutTimer.Stop()
@@ -136,7 +156,7 @@ func (r *ReconcilePerconaServerMongoDB) waitForCerts(namespace string, secretsLi
 			sucessCount := 0
 			for _, secretName := range secretsList {
 				secret := &corev1.Secret{}
-				err := r.client.Get(context.TODO(), types.NamespacedName{
+				err := r.client.Get(ctx, types.NamespacedName{
 					Name:      secretName,
 					Namespace: namespace,
 				}, secret)
@@ -153,7 +173,7 @@ func (r *ReconcilePerconaServerMongoDB) waitForCerts(namespace string, secretsLi
 	}
 }
 
-func (r *ReconcilePerconaServerMongoDB) createSSLManualy(cr *api.PerconaServerMongoDB) error {
+func (r *ReconcilePerconaServerMongoDB) createSSLManualy(ctx context.Context, cr *api.PerconaServerMongoDB) error {
 	data := make(map[string][]byte)
 	certificateDNSNames := []string{"localhost"}
 	for _, replset := range cr.Spec.Replsets {
@@ -183,8 +203,8 @@ func (r *ReconcilePerconaServerMongoDB) createSSLManualy(cr *api.PerconaServerMo
 		Data: data,
 		Type: corev1.SecretTypeTLS,
 	}
-	err = r.client.Create(context.TODO(), &secretObj)
-	if err != nil {
+	err = r.client.Create(ctx, &secretObj)
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create TLS secret: %v", err)
 	}
 
@@ -204,8 +224,8 @@ func (r *ReconcilePerconaServerMongoDB) createSSLManualy(cr *api.PerconaServerMo
 		Data: data,
 		Type: corev1.SecretTypeTLS,
 	}
-	err = r.client.Create(context.TODO(), &secretObjInternal)
-	if err != nil {
+	err = r.client.Create(ctx, &secretObjInternal)
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create TLS internal secret: %v", err)
 	}
 	return nil

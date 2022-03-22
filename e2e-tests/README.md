@@ -63,12 +63,16 @@ needs some repository for the newly created docker images. If nothing is
 specified, scripts use Percona's experimental repository `perconalab/percona-server-mongodb-operator`, which
 requires decent access rights to make a push.
 
-To specify your own repository for the Percona Server for MongoDB Operator docker image, you can use IMAGE environment variable:
+To specify your own repository for the Percona Distribution for MongoDB Operator docker image, you can use IMAGE environment variable:
 
 ```
 export IMAGE=bob/my_repository_for_test_images:K8SPSMDB-372-fix-feature-X
 ```
+We use linux/amd64 platform by default. To specify another platform, you can use DOCKER_DEFAULT_PLATFORM environment variable
 
+```
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+```
 Use the following script to build the image:
 
 ```

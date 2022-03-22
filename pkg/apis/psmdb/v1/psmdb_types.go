@@ -3,13 +3,13 @@ package v1
 import (
 	"encoding/json"
 	"fmt"
+	"gopkg.in/yaml.v2"
 	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
 	v "github.com/hashicorp/go-version"
 	"github.com/percona/percona-backup-mongodb/pbm"
-	"github.com/percona/percona-server-mongodb-operator/version"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	k8sversion "k8s.io/apimachinery/pkg/version"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+
+	"github.com/percona/percona-server-mongodb-operator/version"
 )
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -72,6 +74,25 @@ type PerconaServerMongoDBSpec struct {
 	ServiceMeshDNS          bool                                 `json:"ServiceMeshDNS,omitempty"`
 	Sharding                Sharding                             `json:"sharding,omitempty"`
 	InitImage               string                               `json:"initImage,omitempty"`
+	TLS                     *TLSSpec                             `json:"tls,omitempty"`
+}
+
+type TLSSpec struct {
+	CertValidityDuration metav1.Duration `json:"certValidityDuration,omitempty"`
+}
+
+// EncryptionKeySecretName returns spec.Secrets.EncryptionKey.
+// If it's empty, spec.Mongod.Security.EncryptionKeySecret is returned.
+//
+// TODO: Remove after 1.14
+func (spec *PerconaServerMongoDBSpec) EncryptionKeySecretName() string {
+	if spec.Secrets != nil && spec.Secrets.EncryptionKey != "" {
+		return spec.Secrets.EncryptionKey
+	}
+	if spec.Mongod != nil && spec.Mongod.Security != nil {
+		return spec.Mongod.Security.EncryptionKeySecret
+	}
+	return ""
 }
 
 const (
@@ -293,9 +314,74 @@ type NonVotingSpec struct {
 	LivenessProbe            *LivenessProbeExtended     `json:"livenessProbe,omitempty"`
 	PodSecurityContext       *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 	ContainerSecurityContext *corev1.SecurityContext    `json:"containerSecurityContext,omitempty"`
-	Configuration            string                     `json:"configuration,omitempty"`
+	Configuration            MongoConfiguration         `json:"configuration,omitempty"`
 
 	MultiAZ
+}
+
+type MongoConfiguration string
+
+func (conf MongoConfiguration) GetOptions(name string) (map[interface{}]interface{}, error) {
+	m := make(map[string]interface{})
+	err := yaml.Unmarshal([]byte(conf), m)
+	if err != nil {
+		return nil, err
+	}
+	val, ok := m[name]
+	if !ok {
+		return nil, nil
+	}
+	options, _ := val.(map[interface{}]interface{})
+	return options, nil
+}
+
+func (conf MongoConfiguration) IsEncryptionEnabled() (bool, error) {
+	m, err := conf.GetOptions("security")
+	if err != nil || m == nil {
+		return true, err // true by default
+	}
+	enabled, ok := m["enableEncryption"]
+	if !ok {
+		return true, nil // true by default
+	}
+	b, ok := enabled.(bool)
+	if !ok {
+		return false, errors.New("enableEncryption value is not bool")
+	}
+	return b, nil
+}
+
+// setEncryptionDefaults sets encryptionKeyFile to a default value if enableEncryption is specified.
+func (conf *MongoConfiguration) setEncryptionDefaults() error {
+	m := make(map[string]interface{})
+	err := yaml.Unmarshal([]byte(*conf), m)
+	if err != nil {
+		return err
+	}
+	val, ok := m["security"]
+	if !ok {
+		return nil
+	}
+	security, ok := val.(map[interface{}]interface{})
+	if !ok {
+		return errors.New("security configuration section is invalid")
+	}
+	if _, ok = security["enableEncryption"]; ok {
+		security["encryptionKeyFile"] = MongodRESTencryptDir + "/" + EncryptionKeyName
+	}
+	res, err := yaml.Marshal(m)
+	if err != nil {
+		return err
+	}
+	*conf = MongoConfiguration(res)
+	return nil
+}
+
+func (conf *MongoConfiguration) SetDefaults() error {
+	if err := conf.setEncryptionDefaults(); err != nil {
+		return errors.Wrap(err, "failed to set encryption defaults")
+	}
+	return nil
 }
 
 type ReplsetSpec struct {
@@ -311,7 +397,7 @@ type ReplsetSpec struct {
 	PodSecurityContext       *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 	ContainerSecurityContext *corev1.SecurityContext    `json:"containerSecurityContext,omitempty"`
 	Storage                  *MongodSpecStorage         `json:"storage,omitempty"`
-	Configuration            string                     `json:"configuration,omitempty"`
+	Configuration            MongoConfiguration         `json:"configuration,omitempty"`
 	ExternalNodes            []*ExternalNode            `json:"externalNodes,omitempty"`
 	NonVoting                NonVotingSpec              `json:"nonvoting,omitempty"`
 
@@ -324,11 +410,11 @@ type LivenessProbeExtended struct {
 }
 
 func (l LivenessProbeExtended) CommandHas(flag string) bool {
-	if l.Handler.Exec == nil {
+	if l.ProbeHandler.Exec == nil {
 		return false
 	}
 
-	for _, v := range l.Handler.Exec.Command {
+	for _, v := range l.ProbeHandler.Exec.Command {
 		if v == flag {
 			return true
 		}
@@ -362,9 +448,10 @@ type ResourcesSpec struct {
 }
 
 type SecretsSpec struct {
-	Users       string `json:"users,omitempty"`
-	SSL         string `json:"ssl,omitempty"`
-	SSLInternal string `json:"sslInternal,omitempty"`
+	Users         string `json:"users,omitempty"`
+	SSL           string `json:"ssl,omitempty"`
+	SSLInternal   string `json:"sslInternal,omitempty"`
+	EncryptionKey string `json:"encryptionKey,omitempty"`
 }
 
 type MongosSpec struct {
@@ -379,7 +466,7 @@ type MongosSpec struct {
 	LivenessProbe            *LivenessProbeExtended     `json:"livenessProbe,omitempty"`
 	PodSecurityContext       *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 	ContainerSecurityContext *corev1.SecurityContext    `json:"containerSecurityContext,omitempty"`
-	Configuration            string                     `json:"configuration,omitempty"`
+	Configuration            MongoConfiguration         `json:"configuration,omitempty"`
 	*ResourcesSpec           `json:"resources,omitempty"`
 }
 
@@ -518,20 +605,25 @@ type MongodSpecOperationProfiling struct {
 }
 
 type BackupTaskSpec struct {
-	Name            string              `json:"name"`
-	Enabled         bool                `json:"enabled"`
-	Keep            int                 `json:"keep,omitempty"`
-	Schedule        string              `json:"schedule,omitempty"`
-	StorageName     string              `json:"storageName,omitempty"`
-	CompressionType pbm.CompressionType `json:"compressionType,omitempty"`
+	Name             string              `json:"name"`
+	Enabled          bool                `json:"enabled"`
+	Keep             int                 `json:"keep,omitempty"`
+	Schedule         string              `json:"schedule,omitempty"`
+	StorageName      string              `json:"storageName,omitempty"`
+	CompressionType  pbm.CompressionType `json:"compressionType,omitempty"`
+	CompressionLevel *int                `json:"compressionLevel,omitempty"`
 }
 
 type BackupStorageS3Spec struct {
-	Bucket            string `json:"bucket"`
-	Prefix            string `json:"prefix,omitempty"`
-	Region            string `json:"region,omitempty"`
-	EndpointURL       string `json:"endpointUrl,omitempty"`
-	CredentialsSecret string `json:"credentialsSecret"`
+	Bucket                string `json:"bucket"`
+	Prefix                string `json:"prefix,omitempty"`
+	Region                string `json:"region,omitempty"`
+	EndpointURL           string `json:"endpointUrl,omitempty"`
+	CredentialsSecret     string `json:"credentialsSecret"`
+	UploadPartSize        int    `json:"uploadPartSize,omitempty"`
+	MaxUploadParts        int    `json:"maxUploadParts,omitempty"`
+	StorageClass          string `json:"storageClass,omitempty"`
+	InsecureSkipTLSVerify bool   `json:"insecureSkipTLSVerify"`
 }
 
 type BackupStorageAzureSpec struct {
@@ -555,8 +647,10 @@ type BackupStorageSpec struct {
 }
 
 type PITRSpec struct {
-	Enabled      bool    `json:"enabled,omitempty"`
-	OplogSpanMin float64 `json:"oplogSpanMin,omitempty"`
+	Enabled          bool                `json:"enabled,omitempty"`
+	OplogSpanMin     float64             `json:"oplogSpanMin,omitempty"`
+	Compression      pbm.CompressionType `json:"compression,omitempty"`
+	CompressionLevel *int64              `json:"compressionLevel,omitempty"`
 }
 
 func (p PITRSpec) Disabled() PITRSpec {
@@ -567,6 +661,7 @@ func (p PITRSpec) Disabled() PITRSpec {
 type BackupSpec struct {
 	Enabled                  bool                         `json:"enabled"`
 	Annotations              map[string]string            `json:"annotations,omitempty"`
+	Labels                   map[string]string            `json:"labels,omitempty"`
 	Storages                 map[string]BackupStorageSpec `json:"storages,omitempty"`
 	Image                    string                       `json:"image,omitempty"`
 	Tasks                    []BackupTaskSpec             `json:"tasks,omitempty"`
