@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,10 +27,10 @@ import (
 
 const (
 	agentContainerName               = "backup-agent"
-	awsAccessKeySecretKey            = "AWS_ACCESS_KEY_ID"
-	awsSecretAccessKeySecretKey      = "AWS_SECRET_ACCESS_KEY"
-	azureStorageAccountNameSecretKey = "AZURE_STORAGE_ACCOUNT_NAME"
-	azureStorageAccountKeySecretKey  = "AZURE_STORAGE_ACCOUNT_KEY"
+	AWSAccessKeySecretKey            = "AWS_ACCESS_KEY_ID"
+	AWSSecretAccessKeySecretKey      = "AWS_SECRET_ACCESS_KEY"
+	AzureStorageAccountNameSecretKey = "AZURE_STORAGE_ACCOUNT_NAME"
+	AzureStorageAccountKeySecretKey  = "AZURE_STORAGE_ACCOUNT_KEY"
 )
 
 type PBM struct {
@@ -64,8 +65,8 @@ func NewPBM(ctx context.Context, c client.Client, cluster *api.PerconaServerMong
 	}
 
 	murl := fmt.Sprintf("mongodb://%s:%s@%s/",
-		scr.Data["MONGODB_BACKUP_USER"],
-		scr.Data["MONGODB_BACKUP_PASSWORD"],
+		url.QueryEscape(string(scr.Data["MONGODB_BACKUP_USER"])),
+		url.QueryEscape(string(scr.Data["MONGODB_BACKUP_PASSWORD"])),
 		strings.Join(addrs, ","),
 	)
 
@@ -133,7 +134,9 @@ func (b *PBM) GetPriorities(ctx context.Context, k8sclient client.Client, cluste
 func (b *PBM) SetConfig(ctx context.Context, stg api.BackupStorageSpec, pitr api.PITRSpec, priority map[string]float64) error {
 	conf := pbm.Config{
 		PITR: pbm.PITRConf{
-			Enabled: pitr.Enabled,
+			Enabled:          pitr.Enabled,
+			Compression:      pitr.CompressionType,
+			CompressionLevel: pitr.CompressionLevel,
 		},
 		Backup: pbm.BackupConf{
 			Priority: priority,
@@ -163,8 +166,8 @@ func (b *PBM) SetConfig(ctx context.Context, stg api.BackupStorageSpec, pitr api
 			}
 
 			conf.Storage.S3.Credentials = s3.Credentials{
-				AccessKeyID:     string(s3secret.Data[awsAccessKeySecretKey]),
-				SecretAccessKey: string(s3secret.Data[awsSecretAccessKeySecretKey]),
+				AccessKeyID:     string(s3secret.Data[AWSAccessKeySecretKey]),
+				SecretAccessKey: string(s3secret.Data[AWSSecretAccessKeySecretKey]),
 			}
 		}
 	case api.BackupStorageFilesystem:
@@ -180,11 +183,11 @@ func (b *PBM) SetConfig(ctx context.Context, stg api.BackupStorageSpec, pitr api
 		conf.Storage = pbm.StorageConf{
 			Type: pbm.StorageAzure,
 			Azure: azure.Conf{
-				Account:   string(azureSecret.Data[azureStorageAccountNameSecretKey]),
+				Account:   string(azureSecret.Data[AzureStorageAccountNameSecretKey]),
 				Container: stg.Azure.Container,
 				Prefix:    stg.Azure.Prefix,
 				Credentials: azure.Credentials{
-					Key: string(azureSecret.Data[azureStorageAccountKeySecretKey]),
+					Key: string(azureSecret.Data[AzureStorageAccountKeySecretKey]),
 				},
 			},
 		}

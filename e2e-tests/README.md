@@ -45,14 +45,14 @@ Install [Docker](https://docs.docker.com/docker-for-mac/install/), and run the f
 
 ```
 brew install coreutils gnu-sed jq kubernetes-cli openshift-cli kubernetes-helm
-brew install yq@3
-brew link yq@3
+wget https://github.com/mikefarah/yq/releases/download/3.4.1/yq_darwin_amd64 -O /usr/local/bin/yq &&    chmod +x /usr/local/bin/yq
+cp /usr/local/bin/yq /opt/homebrew/bin
 curl https://sdk.cloud.google.com | bash
 ```
 
 ### Runtime requirements
 
-Also, you need a Kubernetes platform of [supported version](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/System-Requirements.html#officially-supported-platforms), available via [EKS](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/eks.html), [GKE](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/gke.html), [OpenShift](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/openshift.html) or [minikube](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/minikube.html) to run the Operator.  Other Kubernetes flavors and versions depend on the backward compatibility offered by Kubernetes.
+Also, you need a Kubernetes platform of [supported version](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/System-Requirements.html#officially-supported-platforms) to run the Operator in available clouds (install instructions [EKS](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/eks.html), [GKE](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/gke.html), [OpenShift](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/openshift.html) or [minikube](https://www.percona.com/doc/kubernetes-operator-for-psmongodb/minikube.html) ).  Other Kubernetes flavors and versions depend on the backward compatibility offered by Kubernetes.
 
 **Note:** there is no need to build an image if you are going to test some already-released version.
 
@@ -63,7 +63,7 @@ needs some repository for the newly created docker images. If nothing is
 specified, scripts use Percona's experimental repository `perconalab/percona-server-mongodb-operator`, which
 requires decent access rights to make a push.
 
-To specify your own repository for the Percona Distribution for MongoDB Operator docker image, you can use IMAGE environment variable:
+To specify your own repository for the Percona Operator for MongoDB docker image, you can use IMAGE environment variable:
 
 ```
 export IMAGE=bob/my_repository_for_test_images:K8SPSMDB-372-fix-feature-X

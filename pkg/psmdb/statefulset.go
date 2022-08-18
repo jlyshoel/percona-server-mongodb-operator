@@ -66,18 +66,33 @@ func StatefulSpec(m *api.PerconaServerMongoDB, replset *api.ReplsetSpec, contain
 	}
 
 	if encryptionEnabled {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name: m.Spec.EncryptionKeySecretName(),
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						DefaultMode: &secretFileMode,
-						SecretName:  m.Spec.EncryptionKeySecretName(),
-						Optional:    &fvar,
+		if len(m.Spec.Secrets.Vault) != 0 {
+			volumes = append(volumes,
+				corev1.Volume{
+					Name: m.Spec.Secrets.Vault,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							DefaultMode: &secretFileMode,
+							SecretName:  m.Spec.Secrets.Vault,
+							Optional:    &fvar,
+						},
 					},
 				},
-			},
-		)
+			)
+		} else {
+			volumes = append(volumes,
+				corev1.Volume{
+					Name: m.Spec.EncryptionKeySecretName(),
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							DefaultMode: &secretFileMode,
+							SecretName:  m.Spec.EncryptionKeySecretName(),
+							Optional:    &fvar,
+						},
+					},
+				},
+			)
+		}
 	}
 
 	c, err := container(m, replset, containerName, resources, ikeyName, customConf.Type.IsUsable(),
@@ -203,7 +218,13 @@ func isEncryptionEnabled(cr *api.PerconaServerMongoDB, replset *api.ReplsetSpec)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to parse replset configuration")
 		}
-		return enabled, nil
+		if enabled == nil {
+			if cr.Spec.Mongod.Security != nil && cr.Spec.Mongod.Security.EnableEncryption != nil {
+				return *cr.Spec.Mongod.Security.EnableEncryption, nil
+			}
+			return true, nil // true by default
+		}
+		return *enabled, nil
 	}
 	return *cr.Spec.Mongod.Security.EnableEncryption, nil
 }

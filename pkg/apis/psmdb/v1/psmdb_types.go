@@ -68,7 +68,6 @@ type PerconaServerMongoDBSpec struct {
 	Platform                *version.Platform                    `json:"platform,omitempty"`
 	Image                   string                               `json:"image,omitempty"`
 	ImagePullSecrets        []corev1.LocalObjectReference        `json:"imagePullSecrets,omitempty"`
-	RunUID                  int64                                `json:"runUid,omitempty"`
 	UnsafeConf              bool                                 `json:"allowUnsafeConfigurations,omitempty"`
 	Mongod                  *MongodSpec                          `json:"mongod,omitempty"`
 	Replsets                []*ReplsetSpec                       `json:"replsets,omitempty"`
@@ -186,16 +185,18 @@ func OneOfUpgradeStrategy(a string) bool {
 
 	return us == UpgradeStrategyLatest ||
 		us == UpgradeStrategyRecommended ||
-		us == UpgradeStrategyDiasbled ||
+		us == UpgradeStrategyDisabled ||
 		us == UpgradeStrategyNever
 }
 
 const (
-	UpgradeStrategyDiasbled    UpgradeStrategy = "disabled"
+	UpgradeStrategyDisabled    UpgradeStrategy = "disabled"
 	UpgradeStrategyNever       UpgradeStrategy = "never"
 	UpgradeStrategyRecommended UpgradeStrategy = "recommended"
 	UpgradeStrategyLatest      UpgradeStrategy = "latest"
 )
+
+const DefaultVersionServiceEndpoint = "https://check.percona.com"
 
 // PerconaServerMongoDBStatus defines the observed state of PerconaServerMongoDB
 type PerconaServerMongoDBStatus struct {
@@ -240,6 +241,23 @@ type PMMSpec struct {
 	MongosParams string `json:"mongosParams,omitempty"`
 
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+const (
+	PMMUserKey     = "PMM_SERVER_USER"
+	PMMPasswordKey = "PMM_SERVER_PASSWORD"
+	PMMAPIKey      = "PMM_SERVER_API_KEY"
+)
+
+func (spec *PMMSpec) ShouldUseAPIKeyAuth(secret *corev1.Secret) bool {
+	if _, ok := secret.Data[PMMAPIKey]; !ok {
+		_, okl := secret.Data[PMMUserKey]
+		_, okp := secret.Data[PMMPasswordKey]
+		if okl && okp {
+			return false
+		}
+	}
+	return true
 }
 
 type MultiAZ struct {
@@ -367,45 +385,67 @@ func (conf MongoConfiguration) GetOptions(name string) (map[interface{}]interfac
 	return options, nil
 }
 
-func (conf MongoConfiguration) IsEncryptionEnabled() (bool, error) {
+// IsEncryptionEnabled returns nil if "enableEncryption" field is not specified or the pointer to the value of this field
+func (conf MongoConfiguration) IsEncryptionEnabled() (*bool, error) {
 	m, err := conf.GetOptions("security")
 	if err != nil || m == nil {
-		return true, err // true by default
+		return nil, err
 	}
 	enabled, ok := m["enableEncryption"]
 	if !ok {
-		return true, nil // true by default
+		return nil, nil
 	}
 	b, ok := enabled.(bool)
 	if !ok {
-		return false, errors.New("enableEncryption value is not bool")
+		return nil, errors.New("enableEncryption value is not bool")
 	}
-	return b, nil
+	return &b, nil
+}
+
+// VaultEnabled returns whether mongo config has vault section under security
+func (conf MongoConfiguration) VaultEnabled() bool {
+	m, err := conf.GetOptions("security")
+	if err != nil || m == nil {
+		return false
+	}
+	_, ok := m["vault"]
+	return ok
 }
 
 // setEncryptionDefaults sets encryptionKeyFile to a default value if enableEncryption is specified.
 func (conf *MongoConfiguration) setEncryptionDefaults() error {
 	m := make(map[string]interface{})
+
 	err := yaml.Unmarshal([]byte(*conf), m)
 	if err != nil {
 		return err
 	}
+
 	val, ok := m["security"]
 	if !ok {
 		return nil
 	}
+
 	security, ok := val.(map[interface{}]interface{})
 	if !ok {
 		return errors.New("security configuration section is invalid")
 	}
+
+	if _, ok := security["vault"]; ok {
+		return nil
+	}
+
 	if _, ok = security["enableEncryption"]; ok {
 		security["encryptionKeyFile"] = MongodRESTencryptDir + "/" + EncryptionKeyName
 	}
+
 	res, err := yaml.Marshal(m)
 	if err != nil {
 		return err
 	}
+
 	*conf = MongoConfiguration(res)
+
 	return nil
 }
 
@@ -433,6 +473,22 @@ type ReplsetSpec struct {
 	Configuration            MongoConfiguration         `json:"configuration,omitempty"`
 	ExternalNodes            []*ExternalNode            `json:"externalNodes,omitempty"`
 	NonVoting                NonVotingSpec              `json:"nonvoting,omitempty"`
+}
+
+func (r *ReplsetSpec) ServiceName(cr *PerconaServerMongoDB) string {
+	return cr.Name + "-" + r.Name
+}
+
+func (r *ReplsetSpec) PodFQDN(cr *PerconaServerMongoDB, podName string) string {
+	if r.Expose.Enabled {
+		return fmt.Sprintf("%s.%s.%s", podName, cr.Namespace, cr.Spec.ClusterServiceDNSSuffix)
+	}
+
+	return fmt.Sprintf("%s.%s.%s.%s", podName, r.ServiceName(cr), cr.Namespace, cr.Spec.ClusterServiceDNSSuffix)
+}
+
+func (r *ReplsetSpec) PodFQDNWithPort(cr *PerconaServerMongoDB, podName string) string {
+	return fmt.Sprintf("%s:%d", r.PodFQDN(cr, podName), MongodPort(cr))
 }
 
 type LivenessProbeExtended struct {
@@ -473,6 +529,7 @@ type SecretsSpec struct {
 	SSL           string `json:"ssl,omitempty"`
 	SSLInternal   string `json:"sslInternal,omitempty"`
 	EncryptionKey string `json:"encryptionKey,omitempty"`
+	Vault         string `json:"vault,omitempty"`
 }
 
 type MongosSpec struct {
@@ -635,16 +692,20 @@ type BackupTaskSpec struct {
 	CompressionLevel *int                `json:"compressionLevel,omitempty"`
 }
 
+func (task *BackupTaskSpec) JobName(cr *PerconaServerMongoDB) string {
+	return cr.Name + "-backup-" + task.Name
+}
+
 type BackupStorageS3Spec struct {
 	Bucket                string `json:"bucket"`
 	Prefix                string `json:"prefix,omitempty"`
 	Region                string `json:"region,omitempty"`
 	EndpointURL           string `json:"endpointUrl,omitempty"`
-	CredentialsSecret     string `json:"credentialsSecret"`
+	CredentialsSecret     string `json:"credentialsSecret,omitempty"`
 	UploadPartSize        int    `json:"uploadPartSize,omitempty"`
 	MaxUploadParts        int    `json:"maxUploadParts,omitempty"`
 	StorageClass          string `json:"storageClass,omitempty"`
-	InsecureSkipTLSVerify bool   `json:"insecureSkipTLSVerify"`
+	InsecureSkipTLSVerify bool   `json:"insecureSkipTLSVerify,omitempty"`
 }
 
 type BackupStorageAzureSpec struct {
@@ -670,8 +731,8 @@ type BackupStorageSpec struct {
 type PITRSpec struct {
 	Enabled          bool                `json:"enabled,omitempty"`
 	OplogSpanMin     numstr.NumberString `json:"oplogSpanMin,omitempty"`
-	Compression      pbm.CompressionType `json:"compression,omitempty"`
-	CompressionLevel *int64              `json:"compressionLevel,omitempty"`
+	CompressionType  pbm.CompressionType `json:"compressionType,omitempty"`
+	CompressionLevel *int                `json:"compressionLevel,omitempty"`
 }
 
 func (p PITRSpec) Disabled() PITRSpec {
@@ -865,5 +926,5 @@ func (cr *PerconaServerMongoDB) GetExternalNodes() []*ExternalNode {
 }
 
 func (cr *PerconaServerMongoDB) MCSEnabled() bool {
-    return mcs.IsAvailable() && cr.Spec.MultiCluster.Enabled
+	return mcs.IsAvailable() && cr.Spec.MultiCluster.Enabled
 }

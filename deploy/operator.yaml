@@ -18,11 +18,16 @@ spec:
           image: perconalab/percona-server-mongodb-operator:main
           ports:
           - containerPort: 60000
+            protocol: TCP
             name: metrics
           command:
           - percona-server-mongodb-operator
           imagePullPolicy: Always
           env:
+            - name: LOG_STRUCTURED
+              value: 'false'
+            - name: LOG_LEVEL
+              value: INFO
             - name: WATCH_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -36,4 +41,6 @@ spec:
             - name: RESYNC_PERIOD
               value: 5s
             - name: LOG_VERBOSE
+              value: "false"
+            - name: DISABLE_TELEMETRY
               value: "false"

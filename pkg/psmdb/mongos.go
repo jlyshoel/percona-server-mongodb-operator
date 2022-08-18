@@ -2,12 +2,12 @@ package psmdb
 
 import (
 	"fmt"
-	"github.com/go-logr/logr"
-	appsv1 "k8s.io/api/apps/v1"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/go-logr/logr"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -84,7 +84,7 @@ func MongosDeploymentSpec(cr *api.PerconaServerMongoDB, template corev1.PodTempl
 	}
 }
 
-func MongosTemplateSpec(cr *api.PerconaServerMongoDB, operatorPod corev1.Pod, log logr.Logger, customConf CustomConfig, cfgInstances []string) (corev1.PodTemplateSpec, error) {
+func MongosTemplateSpec(cr *api.PerconaServerMongoDB, initImage string, log logr.Logger, customConf CustomConfig, cfgInstances []string) (corev1.PodTemplateSpec, error) {
 	ls := mongosLabels(cr)
 
 	if cr.Spec.Sharding.Mongos.Labels != nil {
@@ -98,7 +98,7 @@ func MongosTemplateSpec(cr *api.PerconaServerMongoDB, operatorPod corev1.Pod, lo
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to create container %v", err)
 	}
 
-	initContainers := InitContainers(cr, operatorPod)
+	initContainers := InitContainers(cr, initImage)
 	for i := range initContainers {
 		initContainers[i].Resources = c.Resources
 	}
@@ -139,13 +139,13 @@ func MongosTemplateSpec(cr *api.PerconaServerMongoDB, operatorPod corev1.Pod, lo
 	}, nil
 }
 
-func InitContainers(cr *api.PerconaServerMongoDB, operatorPod corev1.Pod) []corev1.Container {
+func InitContainers(cr *api.PerconaServerMongoDB, initImage string) []corev1.Container {
 	image := cr.Spec.InitImage
 	if len(image) == 0 {
 		if cr.CompareVersion(version.Version) != 0 {
-			image = strings.Split(operatorPod.Spec.Containers[0].Image, ":")[0] + ":" + cr.Spec.CRVersion
+			image = strings.Split(initImage, ":")[0] + ":" + cr.Spec.CRVersion
 		} else {
-			image = operatorPod.Spec.Containers[0].Image
+			image = initImage
 		}
 	}
 	return []corev1.Container{EntrypointInitContainer(image, cr.Spec.ImagePullPolicy)}
@@ -291,7 +291,7 @@ func mongosContainerArgs(cr *api.PerconaServerMongoDB, resources corev1.Resource
 		}
 	}
 
-	if msSpec.AuditLog != nil && msSpec.AuditLog.Destination == api.AuditLogDestinationFile {
+	if cr.CompareVersion("1.13.0") < 0 && msSpec.AuditLog != nil && msSpec.AuditLog.Destination == api.AuditLogDestinationFile {
 		if msSpec.AuditLog.Filter == "" {
 			msSpec.AuditLog.Filter = "{}"
 		}

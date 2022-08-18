@@ -60,22 +60,21 @@ check_recovery() {
 		| $sed -e "s/name:/name: restore-$backup_name/" \
 		| $sed -e "s/backupName:/backupName: $backup_name/" \
 		| $sed -e "s/type:/type: $restore_type/" \
-		| $sed -e "s/date:/date: $restore_date/" \
+		| if [ -z "$restore_date" ]; then $sed -e "/date:/d"; else $sed -e "s/date:/date: $restore_date/"; fi \
 		| kubectl_bin apply -f -
 
 	wait_restore_object "$backup_name"
 	echo
 	set -o xtrace
 
-  wait_for_running $cluster-mongos 3
+	wait_for_running $cluster-mongos 3
 	sleep 10
 
 	compare_mongos_cmd "find" "myApp:myPass@$cluster-mongos.$namespace" "$cmp_postfix"
 }
 
 main() {
-	create_namespace $namespace
-	deploy_operator
+	create_infra $namespace
 	deploy_minio
 
 	desc 'create PSMDB cluster'

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -74,6 +75,11 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 		return nil, errors.Wrap(err, "create clientcmd")
 	}
 
+	initImage, err := getOperatorPodImage(context.TODO())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get operator pod image")
+	}
+
 	return &ReconcilePerconaServerMongoDB{
 		client:        mgr.GetClient(),
 		scheme:        mgr.GetScheme(),
@@ -82,8 +88,37 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 		crons:         NewCronRegistry(),
 		lockers:       newLockStore(),
 
+		initImage: initImage,
+
 		clientcmd: cli,
 	}, nil
+}
+
+func getOperatorPodImage(ctx context.Context) (string, error) {
+	cfg, err := config.GetConfig()
+	if err != nil {
+		return "", err
+	}
+
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return "", err
+	}
+
+	nsBytes, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return "", err
+	}
+
+	ns := strings.TrimSpace(string(nsBytes))
+
+	pod := &corev1.Pod{}
+	err = c.Get(ctx, types.NamespacedName{Namespace: ns, Name: os.Getenv("HOSTNAME")}, pod)
+	if err != nil {
+		return "", err
+	}
+
+	return pod.Spec.Containers[0].Image, nil
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -104,8 +139,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 }
 
 type CronRegistry struct {
-	crons *cron.Cron
-	jobs  map[string]Shedule
+	crons      *cron.Cron
+	jobs       map[string]Shedule
+	backupJobs *sync.Map
 }
 
 type Shedule struct {
@@ -115,8 +151,9 @@ type Shedule struct {
 
 func NewCronRegistry() CronRegistry {
 	c := CronRegistry{
-		crons: cron.New(),
-		jobs:  make(map[string]Shedule),
+		crons:      cron.New(),
+		jobs:       make(map[string]Shedule),
+		backupJobs: new(sync.Map),
 	}
 
 	c.crons.Start()
@@ -137,6 +174,8 @@ type ReconcilePerconaServerMongoDB struct {
 	clientcmd     *clientcmd.Client
 	serverVersion *version.ServerVersion
 	reconcileIn   time.Duration
+
+	initImage string
 
 	lockers lockStore
 }
@@ -236,7 +275,7 @@ func (r *ReconcilePerconaServerMongoDB) Reconcile(ctx context.Context, request r
 		return reconcile.Result{}, err
 	}
 
-	err = r.safeDownscale(ctx, cr)
+	isDownscale, err := r.safeDownscale(ctx, cr)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "safe downscale")
 	}
@@ -491,12 +530,20 @@ func (r *ReconcilePerconaServerMongoDB) Reconcile(ctx context.Context, request r
 		return reconcile.Result{}, errors.Wrap(err, "delete config server")
 	}
 
+	// clean orphan PVCs if downscale
+	if isDownscale {
+		err = r.deleteOrphanPVCs(ctx, cr)
+		if err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to delete orphan PVCs: %v", err)
+		}
+	}
+
 	err = r.exportServices(ctx, cr)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "export services")
 	}
 
-	err = r.sheduleEnsureVersion(ctx, cr, VersionServiceClient{})
+	err = r.scheduleEnsureVersion(ctx, cr, VersionServiceClient{})
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "failed to ensure version")
 	}
@@ -536,11 +583,13 @@ func (r *ReconcilePerconaServerMongoDB) checkConfiguration(ctx context.Context, 
 	return nil
 }
 
-func (r *ReconcilePerconaServerMongoDB) safeDownscale(ctx context.Context, cr *api.PerconaServerMongoDB) error {
+// safeDownscale ensures replica set pods downscaled one by one and returns true if a downscale is in progress
+func (r *ReconcilePerconaServerMongoDB) safeDownscale(ctx context.Context, cr *api.PerconaServerMongoDB) (bool, error) {
+	isDownscale := false
 	for _, rs := range cr.Spec.Replsets {
 		sf, err := r.getRsStatefulset(ctx, cr, rs.Name)
 		if err != nil && !k8serrors.IsNotFound(err) {
-			return errors.Wrap(err, "get rs statefulset")
+			return false, errors.Wrap(err, "get rs statefulset")
 		}
 
 		if k8serrors.IsNotFound(err) {
@@ -550,10 +599,11 @@ func (r *ReconcilePerconaServerMongoDB) safeDownscale(ctx context.Context, cr *a
 		// downscale 1 pod on each reconciliation
 		if *sf.Spec.Replicas-rs.Size > 1 {
 			rs.Size = *sf.Spec.Replicas - 1
+			isDownscale = true
 		}
 	}
 
-	return nil
+	return isDownscale, nil
 }
 
 func (r *ReconcilePerconaServerMongoDB) getRemovedSfs(ctx context.Context, cr *api.PerconaServerMongoDB) ([]appsv1.StatefulSet, error) {
@@ -667,16 +717,59 @@ func (r *ReconcilePerconaServerMongoDB) ensureSecurityKey(ctx context.Context, c
 	return created, nil
 }
 
+func (r *ReconcilePerconaServerMongoDB) deleteOrphanPVCs(ctx context.Context, cr *api.PerconaServerMongoDB) error {
+	for _, f := range cr.GetFinalizers() {
+		switch f {
+		case "delete-psmdb-pvc":
+			// remove orphan pvc
+			mongodPVCs, err := r.getMongodPVCs(ctx, cr)
+			if err != nil {
+				return err
+			}
+			mongodPods, err := r.getMongodPods(ctx, cr)
+			if err != nil {
+				return err
+			}
+			mongodPodsMap := make(map[string]bool)
+			for _, pod := range mongodPods.Items {
+				mongodPodsMap[pod.Name] = true
+			}
+			for _, pvc := range mongodPVCs.Items {
+				if strings.HasPrefix(pvc.Name, psmdb.MongodDataVolClaimName+"-") {
+					podName := strings.TrimPrefix(pvc.Name, psmdb.MongodDataVolClaimName+"-")
+					if _, ok := mongodPodsMap[podName]; !ok {
+						// remove the orphan pvc
+						log.Info("remove orphan pvc", "pvc", pvc.Name)
+						err := r.client.Delete(ctx, &pvc)
+						if err != nil {
+							return errors.Wrapf(err, "failed to delete PVC %s", pvc.Name)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (r *ReconcilePerconaServerMongoDB) deleteCfgIfNeeded(ctx context.Context, cr *api.PerconaServerMongoDB) error {
 	if cr.Spec.Sharding.Enabled {
+		return nil
+	}
+
+	upToDate, err := r.isAllSfsUpToDate(ctx, cr)
+	if err != nil {
+		return errors.Wrap(err, "failed to check is all sfs up to date")
+	}
+
+	if !upToDate {
 		return nil
 	}
 
 	sfsName := cr.Name + "-" + api.ConfigReplSetName
 	sfs := psmdb.NewStatefulSet(sfsName, cr.Namespace)
 
-	err := r.client.Delete(ctx, sfs)
-	if err != nil && !k8serrors.IsNotFound(err) {
+	if err := r.client.Delete(ctx, sfs); err != nil && !k8serrors.IsNotFound(err) {
 		return errors.Wrapf(err, "failed to delete sfs: %s", sfs.Name)
 	}
 
@@ -786,6 +879,15 @@ func (r *ReconcilePerconaServerMongoDB) deleteMongos(ctx context.Context, cr *ap
 
 func (r *ReconcilePerconaServerMongoDB) deleteMongosIfNeeded(ctx context.Context, cr *api.PerconaServerMongoDB) error {
 	if cr.Spec.Sharding.Enabled {
+		return nil
+	}
+
+	upToDate, err := r.isAllSfsUpToDate(ctx, cr)
+	if err != nil {
+		return errors.Wrap(err, "failed to check is all sfs up to date")
+	}
+
+	if !upToDate {
 		return nil
 	}
 
@@ -993,11 +1095,6 @@ func (r *ReconcilePerconaServerMongoDB) reconcileMongos(ctx context.Context, cr 
 		mongos = msDepl
 	}
 
-	opPod, err := r.operatorPod(ctx)
-	if err != nil {
-		return errors.Wrap(err, "failed to get operator pod")
-	}
-
 	customConfig, err := r.getCustomConfig(ctx, cr.Namespace, psmdb.MongosCustomConfigName(cr.Name))
 	if err != nil {
 		return errors.Wrap(err, "check if mongos custom configuration exists")
@@ -1026,7 +1123,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileMongos(ctx context.Context, cr 
 		cfgInstances = append(cfgInstances, ext.Host)
 	}
 
-	templateSpec, err := psmdb.MongosTemplateSpec(cr, opPod, log, customConfig, cfgInstances)
+	templateSpec, err := psmdb.MongosTemplateSpec(cr, r.initImage, log, customConfig, cfgInstances)
 	if err != nil {
 		return errors.Wrapf(err, "create template spec for mongos")
 	}
@@ -1063,7 +1160,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileMongos(ctx context.Context, cr 
 			return errors.Wrapf(err, "check pmm secrets: %s", api.UserSecretName(cr))
 		}
 
-		pmmC, err := psmdb.AddPMMContainer(cr, api.UserSecretName(cr), pmmsec, cr.Spec.PMM.MongosParams)
+		pmmC, err := psmdb.AddPMMContainer(cr, &pmmsec, cr.Spec.PMM.MongosParams)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a pmm-client container")
 		}
@@ -1303,11 +1400,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileStatefulSet(
 
 	inits := []corev1.Container{}
 	if cr.CompareVersion("1.5.0") >= 0 {
-		operatorPod, err := r.operatorPod(ctx)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to get operator pod")
-		}
-		inits = append(inits, psmdb.InitContainers(cr, operatorPod)...)
+		inits = append(inits, psmdb.InitContainers(cr, r.initImage)...)
 	}
 
 	customConfig, err := r.getCustomConfig(ctx, cr.Namespace, configName)
@@ -1324,11 +1417,6 @@ func (r *ReconcilePerconaServerMongoDB) reconcileStatefulSet(
 	}
 	if sfsSpec.Template.Annotations == nil {
 		sfsSpec.Template.Annotations = make(map[string]string)
-	}
-	for k, v := range sfs.Spec.Template.Annotations {
-		if _, ok := sfsSpec.Template.Annotations[k]; !ok {
-			sfsSpec.Template.Annotations[k] = v
-		}
 	}
 
 	if cr.CompareVersion("1.8.0") < 0 {
@@ -1417,7 +1505,7 @@ func (r *ReconcilePerconaServerMongoDB) reconcileStatefulSet(
 			if err != nil {
 				return nil, errors.Wrap(err, "check pmm secrets")
 			}
-			pmmC, err := psmdb.AddPMMContainer(cr, api.UserSecretName(cr), pmmsec, cr.Spec.PMM.MongodParams)
+			pmmC, err := psmdb.AddPMMContainer(cr, &pmmsec, cr.Spec.PMM.MongodParams)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to create a pmm-client container")
 			}
@@ -1506,26 +1594,6 @@ func (r *ReconcilePerconaServerMongoDB) reconcilePVCs(sfs *appsv1.StatefulSet, l
 	}
 
 	return nil
-}
-
-func (r *ReconcilePerconaServerMongoDB) operatorPod(ctx context.Context) (corev1.Pod, error) {
-	operatorPod := corev1.Pod{}
-
-	nsBytes, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		return operatorPod, err
-	}
-
-	ns := strings.TrimSpace(string(nsBytes))
-
-	if err := r.client.Get(ctx, types.NamespacedName{
-		Namespace: ns,
-		Name:      os.Getenv("HOSTNAME"),
-	}, &operatorPod); err != nil {
-		return operatorPod, err
-	}
-
-	return operatorPod, nil
 }
 
 func (r *ReconcilePerconaServerMongoDB) getTLSHash(ctx context.Context, cr *api.PerconaServerMongoDB, secretName string) (string, error) {
